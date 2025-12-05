@@ -245,10 +245,14 @@ class CosmosDBService:
                 item=conversation_id,
                 partition_key=user_id
             )
-            logger.info(f"Retrieved conversation {conversation_id}: {len(item.get('messages', []))} messages, title: {item.get('title', 'N/A')}")
             return item
         except Exception as e:
-            logger.warning(f"Failed to retrieve conversation {conversation_id} for user {user_id}: {e}")
+            # 404 is expected for new conversations - only log at debug level
+            error_str = str(e)
+            if "NotFound" in error_str or "404" in error_str:
+                logger.debug(f"Conversation {conversation_id} not found (normal for new conversations)")
+            else:
+                logger.warning(f"Error retrieving conversation {conversation_id}: {e}")
             return None
     
     async def save_conversation(
@@ -257,7 +261,8 @@ class CosmosDBService:
         user_id: str,
         messages: List[dict],
         brief: Optional[CreativeBrief] = None,
-        metadata: Optional[dict] = None
+        metadata: Optional[dict] = None,
+        generated_content: Optional[dict] = None
     ) -> dict:
         """
         Save or update a conversation.
@@ -265,98 +270,64 @@ class CosmosDBService:
         Args:
             conversation_id: Unique conversation identifier
             user_id: User ID for partition key
-            messages: List of conversation messages (will be merged with existing if conversation exists)
+            messages: List of conversation messages
             brief: Associated creative brief
-            metadata: Additional metadata (will be merged with existing)
+            metadata: Additional metadata
+            generated_content: Generated marketing content
         
         Returns:
             The saved conversation document
         """
         await self.initialize()
         
-        existing = await self.get_conversation(conversation_id, user_id)
-        
-        if existing:
-            existing_messages = existing.get("messages", [])
-            if messages:
-                existing_content_timestamps = {
-                    (msg.get("content", ""), msg.get("timestamp", "")) 
-                    for msg in existing_messages
-                }
-                for msg in messages:
-                    msg_key = (msg.get("content", ""), msg.get("timestamp", ""))
-                    if msg_key not in existing_content_timestamps:
-                        existing_messages.append(msg)
-                        existing_content_timestamps.add(msg_key)
-            final_messages = existing_messages if existing_messages else messages
-            title = existing.get("title")
-            existing_metadata = existing.get("metadata", {})
-            if metadata:
-                existing_metadata.update(metadata)
-            metadata = existing_metadata
-            created_at = existing.get("created_at")
-        else:
-            final_messages = messages
-            title = None
-            created_at = datetime.now(timezone.utc).isoformat()
-        
-        if not title and final_messages:
-            first_user_message = next(
-                (msg for msg in final_messages if msg.get("role") == "user"),
-                None
-            )
-            if first_user_message:
-                title = self._generate_title_from_message(first_user_message.get("content", ""))
-        
         item = {
             "id": conversation_id,
             "user_id": user_id,
-            "title": title or "New Conversation",
-            "messages": final_messages,
-            "brief": brief.model_dump() if brief else (existing.get("brief") if existing else None),
+            "messages": messages,
+            "brief": brief.model_dump() if brief else None,
             "metadata": metadata or {},
-            "created_at": created_at or datetime.now(timezone.utc).isoformat(),
+            "generated_content": generated_content,
             "updated_at": datetime.now(timezone.utc).isoformat()
         }
         
         result = await self._conversations_container.upsert_item(item)
-        logger.info(f"Saved conversation {conversation_id}: {len(result.get('messages', []))} messages, title: '{result.get('title', 'N/A')}'")
         return result
     
-    def _generate_title_from_message(self, message_content: str) -> str:
+    async def save_generated_content(
+        self,
+        conversation_id: str,
+        user_id: str,
+        generated_content: dict
+    ) -> dict:
         """
-        Generate a conversation title from the first user message.
+        Save generated content to an existing conversation.
         
         Args:
-            message_content: The first user message content
+            conversation_id: Unique conversation identifier
+            user_id: User ID for partition key
+            generated_content: The generated content to save
         
         Returns:
-            A short title (max 60 characters)
+            Updated conversation document
         """
-        if not message_content:
-            return "New Conversation"
+        await self.initialize()
         
-        content = message_content.strip()
+        conversation = await self.get_conversation(conversation_id, user_id)
         
-        if len(content) <= 60:
-            return content
+        if conversation:
+            conversation["generated_content"] = generated_content
+            conversation["updated_at"] = datetime.now(timezone.utc).isoformat()
+        else:
+            conversation = {
+                "id": conversation_id,
+                "user_id": user_id,
+                "messages": [],
+                "generated_content": generated_content,
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }
         
-        words = content.split()
-        title_words = []
-        current_length = 0
-        
-        for word in words:
-            if current_length + len(word) + 1 <= 57:
-                title_words.append(word)
-                current_length += len(word) + 1
-            else:
-                break
-        
-        title = " ".join(title_words)
-        if len(title) < len(content):
-            title += "..."
-        
-        return title
+        result = await self._conversations_container.upsert_item(conversation)
+        return result
     
     async def add_message_to_conversation(
         self,
@@ -382,30 +353,15 @@ class CosmosDBService:
         if conversation:
             conversation["messages"].append(message)
             conversation["updated_at"] = datetime.now(timezone.utc).isoformat()
-            if not conversation.get("title") or conversation.get("title") == "New Conversation":
-                first_user_message = next(
-                    (msg for msg in conversation.get("messages", []) if msg.get("role") == "user"),
-                    None
-                )
-                if first_user_message:
-                    message_content = first_user_message.get("content", "") or first_user_message.get("text", "")
-                    conversation["title"] = self._generate_title_from_message(message_content)
-                    logger.info(f"Updating conversation {conversation_id} title to: '{conversation['title']}'")
         else:
-            message_content = message.get("content", "") or message.get("text", "")
-            title = self._generate_title_from_message(message_content)
-            logger.info(f"Creating new conversation {conversation_id} with title: '{title}' from message: '{message_content[:50]}...'")
             conversation = {
                 "id": conversation_id,
                 "user_id": user_id,
-                "title": title,
                 "messages": [message],
-                "created_at": datetime.now(timezone.utc).isoformat(),
                 "updated_at": datetime.now(timezone.utc).isoformat()
             }
         
         result = await self._conversations_container.upsert_item(conversation)
-        logger.info(f"Saved conversation {conversation_id} with title: '{result.get('title', 'N/A')}', {len(result.get('messages', []))} messages")
         return result
     
     async def get_user_conversations(
@@ -414,20 +370,20 @@ class CosmosDBService:
         limit: int = 20
     ) -> List[dict]:
         """
-        Get all conversations for a user.
+        Get all conversations for a user with summary data.
         
         Args:
             user_id: User ID
             limit: Maximum number of conversations
         
         Returns:
-            List of conversations
+            List of conversation summaries
         """
         await self.initialize()
         
+        # Get conversations with messages to extract title and last message
         query = """
-            SELECT TOP @limit c.id, c.user_id, c.title, c.updated_at, c.created_at,
-                   ARRAY_LENGTH(c.messages) as message_count
+            SELECT TOP @limit c.id, c.user_id, c.updated_at, c.messages, c.brief
             FROM c 
             WHERE c.user_id = @user_id
             ORDER BY c.updated_at DESC
@@ -442,9 +398,61 @@ class CosmosDBService:
             query=query,
             parameters=params
         ):
-            conversations.append(item)
+            messages = item.get("messages", [])
+            brief = item.get("brief", {})
+            
+            # Extract title from brief overview or first user message
+            title = "Untitled Conversation"
+            if brief and brief.get("overview"):
+                title = brief["overview"][:50]
+            elif messages:
+                for msg in messages:
+                    if msg.get("role") == "user":
+                        title = msg.get("content", "")[:50]
+                        break
+            
+            # Get last message preview
+            last_message = ""
+            if messages:
+                last_msg = messages[-1]
+                last_message = last_msg.get("content", "")[:100]
+            
+            conversations.append({
+                "id": item["id"],
+                "title": title,
+                "lastMessage": last_message,
+                "timestamp": item.get("updated_at", ""),
+                "messageCount": len(messages)
+            })
         
         return conversations
+    
+    async def delete_conversation(
+        self,
+        conversation_id: str,
+        user_id: str
+    ) -> bool:
+        """
+        Delete a conversation.
+        
+        Args:
+            conversation_id: Unique conversation identifier
+            user_id: User ID for partition key
+        
+        Returns:
+            True if deleted successfully
+        """
+        await self.initialize()
+        
+        try:
+            await self._conversations_container.delete_item(
+                item=conversation_id,
+                partition_key=user_id
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to delete conversation {conversation_id}: {e}")
+            raise
 
 
 # Singleton instance

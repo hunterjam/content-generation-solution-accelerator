@@ -66,6 +66,8 @@ IMPORTANT:
 - High visual impact
 """
 
+    credential = None
+    client = None
     try:
         # Get credential
         client_id = app_settings.base_settings.azure_client_id
@@ -112,6 +114,18 @@ IMPORTANT:
             "error": str(e),
             "prompt_used": full_prompt
         }
+    finally:
+        # Clean up resources to prevent "Unclosed client session" warnings
+        if client:
+            try:
+                await client.close()
+            except Exception:
+                pass
+        if credential:
+            try:
+                await credential.close()
+            except Exception:
+                pass
 
 
 def validate_image_prompt(prompt: str) -> dict:

@@ -63,6 +63,11 @@ const AppContent: React.FC = () => {
         const parsed = await parseBrief(input);
         setPendingBrief(parsed.brief);
         
+        // Store the conversation ID from the parsed response
+        if (parsed.conversation_id) {
+          setSelectedConversationId(parsed.conversation_id);
+        }
+        
         yield {
           type: 'agent_response',
           agent: 'PlanningAgent',
@@ -90,41 +95,67 @@ const AppContent: React.FC = () => {
   const handleBriefConfirm = useCallback(async (brief: CreativeBrief) => {
     try {
       const { confirmBrief } = await import('./api');
-      await confirmBrief(brief, selectedConversationId || undefined, userId);
+      const confirmResult = await confirmBrief(brief, selectedConversationId || undefined, userId);
       setConfirmedBrief(brief);
       setPendingBrief(null);
       
-      if (!selectedConversationId) {
-        return;
+      // Use the conversation ID from the confirm response, or the existing one
+      const conversationId = confirmResult.conversation_id || selectedConversationId;
+      
+      // Update the selected conversation ID if we got one from the response
+      if (confirmResult.conversation_id && confirmResult.conversation_id !== selectedConversationId) {
+        setSelectedConversationId(confirmResult.conversation_id);
       }
       
       setIsLoading(true);
       try {
         const { streamGenerateContent } = await import('./api');
         
+        let receivedResponse = false;
+        
         for await (const response of streamGenerateContent(
           brief,
           selectedProducts,
           true,
-          selectedConversationId || undefined
+          conversationId || undefined
         )) {
+          console.log('[App] Received stream response:', response);
+          
+          // Handle error responses
+          if (response.type === 'error') {
+            console.error('[App] Error from backend:', response.content);
+            alert(`Error generating content: ${response.content}`);
+            continue;
+          }
+          
+          // Handle status updates
+          if (response.type === 'status') {
+            console.log('[App] Status:', response.content);
+            continue;
+          }
+          
           if (response.is_final && response.type !== 'error') {
+            receivedResponse = true;
             try {
               const rawContent = JSON.parse(response.content);
+              console.log('[App] Parsed content:', Object.keys(rawContent));
               
               let textContent = rawContent.text_content;
               if (typeof textContent === 'string') {
                 try {
                   textContent = JSON.parse(textContent);
                 } catch {
+                  // Keep as string if not valid JSON
                 }
               }
               
               let imageUrl: string | undefined;
               if (rawContent.image_base64) {
                 imageUrl = `data:image/png;base64,${rawContent.image_base64}`;
+                console.log('[App] Using base64 image');
               } else if (rawContent.image_url) {
                 imageUrl = rawContent.image_url;
+                console.log('[App] Using image URL:', imageUrl);
               }
               
               const content: GeneratedContent = {
@@ -142,12 +173,20 @@ const AppContent: React.FC = () => {
                 violations: rawContent.violations || [],
                 requires_modification: rawContent.requires_modification || false,
               };
+              console.log('[App] Setting generated content:', content);
               setGeneratedContent(content);
             } catch (parseError) {
-              console.error('Error parsing generated content:', parseError);
+              console.error('[App] Error parsing generated content:', parseError, response.content);
             }
           }
         }
+        
+        if (!receivedResponse) {
+          console.error('[App] No valid response received from content generation');
+        }
+      } catch (streamError) {
+        console.error('[App] Stream error:', streamError);
+        alert(`Error during content generation: ${streamError}`);
       } finally {
         setIsLoading(false);
       }
@@ -301,3 +340,4 @@ const App: React.FC = () => {
 };
 
 export default App;
+
