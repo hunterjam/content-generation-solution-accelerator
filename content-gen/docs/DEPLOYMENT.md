@@ -205,29 +205,14 @@ Once you've opened the project in [Codespaces](#github-codespaces), [Dev Contain
    
     Follow steps in [App Authentication](./AppAuthentication.md) to configure authentication in app service. Note: Authentication changes can take up to 10 minutes.
 
-2. **Assign RBAC Roles (if needed)**
 
-    If you encounter 401/403 errors, run the RBAC assignment script and wait 5-10 minutes for propagation:
-
-    ```shell
-    bash ./scripts/assign_rbac_roles.sh
-    ```
-
-3. **Deleting Resources After a Failed Deployment**  
+2. **Deleting Resources After a Failed Deployment**  
     - Follow steps in [Delete Resource Group](./DeleteResourceGroup.md) if your deployment fails and/or you need to clean up the resources.
 
 ## Troubleshooting
 
 <details>
   <summary><b>Common Issues and Solutions</b></summary>
-
-### 401 Unauthorized Errors
-
-**Symptom**: API calls return 401 errors
-
-**Cause**: Missing RBAC role assignments
-
-**Solution**: Run `assign_rbac_roles.sh` and wait 5-10 minutes for propagation
 
 ### 403 Forbidden from Cosmos DB
 
